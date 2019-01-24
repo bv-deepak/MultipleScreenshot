@@ -1,60 +1,75 @@
-
 require "opencv"
-require 'rmagick'
+require 'rmagick' 
+require 'restclient'
+require 'date'
 include Magick
 include OpenCV
-class Page < ApplicationRecord
-	belongs_to :blog
-	has_many :screenshots
-	has_many :unionchanges
-	has_many :diffs
 
-	def capture_screenshot(snap_id)
-		sid = DateTime.now.utc.to_i
-		screenshots_home_path= "#{Rails.root}/screenshots/" + self.url.split("//")[1]
-		if !File.exist?(screenshots_home_path)
-			Dir.mkdir(screenshots_home_path)
-			Dir.mkdir(screenshots_home_path+"/diffImages")
-		end
-		latest_screenshot_path = screenshots_home_path+"/#{sid}.jpg" 
-		query_params = { url: self.url, proxy: "", username: "", password: "" }
-		result = RestClient::Request.execute({ url: "127.0.0.1:8080/har_and_screenshot", user: "", password: "", method: :post, payload: query_params })
-		result = JSON.parse(result.body)
-		File.open(latest_screenshot_path, "wb+") {|f| f.write Base64.decode64(result["full_site_screenshot"])}
-		Screenshot.create( :blog_id => self.blog_id, :page_id => self.id , :sid => sid, :snapshot_id => snap_id , :resp_code => result["site_resp_code"] ) 	
+class ScreenshotJob 
+	def reschedule_at(current_time, attempts)
+		current_time+1.day
 	end
 
-	def calculate_diff
-		debugger
-		url = self.url
-		last_two_screenshots = self.screenshots.last(2)
-		@screenshots_home_path= "#{Rails.root}/screenshots/" + url.split("//")[1]
-		if  last_two_screenshots.count == 2
-			@latest_screenshot_path = @screenshots_home_path+"/#{last_two_screenshots.last.sid}.jpg"	
-			@old_screenshot_path = @screenshots_home_path+"/#{last_two_screenshots.first.sid}.jpg"
-			@image1 = Image.read( @latest_screenshot_path ).first
-			@image2 = Image.read( @old_screenshot_path ).first
-			@coordinates = self.calculate_contours()
-			diff_image, diff_metric = @image1.compare_channel( @image2, Magick::AbsoluteErrorMetric)  
-			percentage_diff = ((diff_metric*100)/(@image1.rows*@image1.columns))        
+	def perform_task(page)
+		@page = page
+		url = @page.url
+		screenshots = @page.screenshots
+		@screenshots_home_path= "#{Rails.root}/Screenshot/" + url.split("//")[1]
+		if  screenshots.last != nil
+			@screenshot_first_path = @screenshots_home_path+"/#{screenshots.last.sid}.jpg"
+		else
+			@screenshot_first_path = nil
+		end
+		@sid = DateTime.now.utc.to_i
+		@screenshot_second_path = @screenshots_home_path+"/#{@sid}.jpg"
+		if !File.exist?(@screenshots_home_path)
+			Dir.mkdir(@screenshots_home_path)
+		end   
+		respCode = take_screenshot(url)
+		@screenshot= Screenshot.new( :blog_id => page.blog_id, :page_id => @page.id , :sid => @sid, :snapshot_id => snap_id , :resp_code => respCode )
+		@screenshot.save
+		if @screenshot_first_path != nil  
+			@image1 = Image.read( @screenshot_first_path ).first
+			@image2 = Image.read( @screenshot_second_path ).first
+			@coordinates = calculate_contours()
+			diff_image, diff_metric  = @image1.compare_channel( @image2, Magick::MeanSquaredErrorMetric)
+			if !File.exist?(@screenshots_home_path+"/diffImages")
+				Dir.mkdir(@screenshots_home_path+"/diffImages")
+			end          
 			diff_image_path="#{@screenshots_home_path}/diffImages/"+DateTime.now.to_i.to_s+".jpg"
 			diff_image.write(diff_image_path)
-			Diff.create(:page_id => self.id, :src_screenshot_id => last_two_screenshots.last.id, :dest_screenshot_id => last_two_screenshots.first.id, :coordinates => @coordinates, :diff_image_path => diff_image_path, :percentage_diff => percentage_diff )
-			self.updateUnionCoordinates()
-		end          
+			Diff.create(:page_id => @page.id, :src_screenshot_id => @screenshot.id, :dest_screenshot_id => screenshots.last.id, :coordinates => @coordinates, :diff_image_path => diff_image_path )
+			@union_changes = @page.unionchanges
+			updateUnionCoordinates()
+		end
 	end
+
+	def perform 
+		blogs = Blog.all
+		blogs.each do |blog|
+			pages = blog.pages
+			pages.each do |page|
+				perform_task(page)
+			end
+		end
+	rescue => e
+		put e
+	ensure
+		raise "Job retry"
+	end
+
 
 	def calculate_contours
 		pixelsOfimg1 = @image1.dispatch( 0,0,@image1.columns,@image1.rows,"I",float=true )
 		pixelsOfimg2 = @image2.dispatch( 0,0,@image2.columns,@image2.rows,"I",float=true )
 		count = [pixelsOfimg1.count ,pixelsOfimg2.count].max
-		for i in 0...count do
+		for i in 0...count do 
 			pixelsOfimg2[i] = ( pixelsOfimg1[i] == pixelsOfimg2[i] ) ? 0.0 : 1.0
 		end
 		rows = (count == pixelsOfimg1.count)? @image1.rows : @image2.rows
 		columns = (count == pixelsOfimg1.count)? @image1.columns : @image2.columns
 		bitmap_diffimage = Image.constitute(columns, rows, "I", pixelsOfimg2)
-		bitmap_diffimage.write( "#{@screenshots_home_path}"+"/bitmap_diffimage.jpg")
+		bitmap_diffimage.write( "#{@screenshots_home_path}"+"/bitmap_diffimage.jpg" )
 		bitmap_diffimage = CvMat.load( "#{@screenshots_home_path}"+"/bitmap_diffimage.jpg")
 		kernel = IplConvKernel.new( 14, 14, 7 , 7, :rect )
 		bitmap_diffimage = bitmap_diffimage.BGR2GRAY
@@ -67,13 +82,12 @@ class Page < ApplicationRecord
 				coordinates =[box.top_left.x, box.top_left.y, box.bottom_right.x, box.bottom_right.y]
 				contour_hash[coordinates] = [99999999999, 1, DateTime.now.utc]
 				contour = contour.h_next
-			end
+			end 
 		end
 		return contour_hash
 	end
 
-	def updateUnionCoordinates
-	    @union_changes = self.unionchanges 	
+	def updateUnionCoordinates	
 		@coordinates.each do |coordinate,value|
 			x1= coordinate.first
 			y1= coordinate.second
@@ -83,7 +97,7 @@ class Page < ApplicationRecord
 				union_coordinate = [x1,y1,x2,y2]
 				union_value = [99999999999, 1, DateTime.now.utc]
 				union_hash = { union_coordinate => union_value }
-				Unionchange.create(:page_id => self.id, :coordinates => union_hash )
+				Unionchange.create(:page_id => @page.id, :coordinates => union_hash )
 			else 
 				flag = false
 				@union_changes.each do |union_change|
@@ -122,31 +136,16 @@ class Page < ApplicationRecord
 					new_union_coordinate=[x1,y1,x2,y2]
 					new_union_value = [ 99999999999, 1, DateTime.now.utc ]
 					new_union_hash = { new_union_coordinate => new_union_value }
-					Unionchange.create(:page_id => self.id, :coordinates => new_union_hash) 
+					Unionchange.create(:page_id => @page.id, :coordinates => new_union_hash) 
 				end
 			end
 		end
 	end
-
-	def getAllDiff
-		hash = Hash.new  
-		all_diffs = self.diffs
-		all_diffs.each do |diff|
-			appeared_at= diff.created_at	
-			coordinates = diff.coordinates  			   
-			coordinates.each do |coordinate,values|			 
-				if ( ! hash.include?(coordinate) )
-					hash[coordinate] = [999999999999999, 1, appeared_at]
-				else
-					old_values=hash[coordinate]
-					values[0]=[ old_values[0], appeared_at-old_values[2]].min   
-					values[1]+=1
-					values[2]=appeared_at
-					hash[coordinate]=values
-				end  
-			end
-		end
-		return hash
+	def take_screenshot( page_url )
+		query_params = { url: page_url, proxy: "", username: "", password: "" }
+		result = RestClient::Request.execute({ url: "127.0.0.1:8080/har_and_screenshot", user: "", password: "", method: :post, payload: query_params })
+		result = JSON.parse(result.body)
+		File.open(@screenshot_second_path, "wb+") {|f| f.write Base64.decode64(result["full_site_screenshot"])}
+		return result["site_resp_code"]
 	end
-end
-
+end  

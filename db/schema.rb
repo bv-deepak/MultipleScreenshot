@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema.define(version: 2019_01_22_102551) do
+ActiveRecord::Schema.define(version: 2019_01_23_130839) do
 
   create_table "blogs", options: "ENGINE=InnoDB DEFAULT CHARSET=utf8", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -25,6 +25,7 @@ ActiveRecord::Schema.define(version: 2019_01_22_102551) do
     t.datetime "updated_at", null: false
     t.bigint "src_screenshot_id"
     t.bigint "dest_screenshot_id"
+    t.float "percentage_diff"
     t.index ["dest_screenshot_id"], name: "fk_rails_fa9d39b035"
     t.index ["page_id"], name: "index_diffs_on_page_id"
     t.index ["src_screenshot_id"], name: "fk_rails_7d66abc544"
