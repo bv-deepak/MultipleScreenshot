@@ -1,7 +1,6 @@
-
 class ScreenshotJob
 	def reschedule_at(current_time, attempts)
-		current_time+1.day
+		current_time + 1.day
 	end
 	def perform
 		blogs = Blog.all
@@ -16,4 +15,4 @@ class ScreenshotJob
 	ensure
 		raise "Job retry"
 	end
-end  
+end

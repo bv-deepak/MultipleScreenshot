@@ -1,11 +1,6 @@
-require "opencv"
-require 'rmagick'
-include Magick
-include OpenCV
-
 class CalculateDiffJob
 	def reschedule_at(current_time, attempts)
-		current_time+1.day
+		current_time + 1.day
 	end
 	def perform
 		blogs = Blog.all
